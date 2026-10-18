@@ -38,7 +38,8 @@ jobs:
       - name: Show compile errors
         if: failure()
         working-directory: android
-        run: grep -E "^e: |error:" build.log | head -60 || true
+        run: |
+          grep -E "^e: |error:" build.log | head -60 || true
 
       - uses: actions/upload-artifact@v4
         with:
