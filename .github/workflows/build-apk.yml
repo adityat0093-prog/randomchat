@@ -2,8 +2,12 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches: ['**']        # every branch, including feature/*
   workflow_dispatch:
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true  # a newer push to the same branch cancels the older run
 
 jobs:
   build:
@@ -27,9 +31,16 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        run: gradle assembleDebug "-PserverUrl=${{ vars.SERVER_URL }}"
+        run: |
+          set -o pipefail
+          gradle assembleDebug --console=plain "-PserverUrl=${{ vars.SERVER_URL }}" 2>&1 | tee build.log
+
+      - name: Show compile errors
+        if: failure()
+        working-directory: android
+        run: grep -E "^e: |error:" build.log | head -60 || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: randomchat-debug-apk
+          name: randomchat-debug-apk-${{ github.run_number }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
