@@ -1,0 +1,15 @@
+{
+  "name": "randomchat-server",
+  "version": "1.0.0",
+  "description": "Signaling and matchmaking server for the Random Chat app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
