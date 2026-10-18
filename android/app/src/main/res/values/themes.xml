@@ -1,3 +1,7 @@
 <resources>
-    <style name="Theme.RandomChat" parent="@android:style/Theme.Material.NoActionBar" />
+    <style name="Theme.RandomChat" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/app_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
 </resources>

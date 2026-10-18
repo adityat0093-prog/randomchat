@@ -1,68 +1,48 @@
 package com.example.randomchat
 
-import android.app.Application
-import android.content.Context
-import android.media.AudioManager
 import android.os.Handler
 import android.os.Looper
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import org.json.JSONArray
 import org.json.JSONObject
-import org.webrtc.EglBase
-import org.webrtc.PeerConnection
-import org.webrtc.VideoTrack
 
-data class ChatMsg(val text: String, val mine: Boolean)
+enum class Kind { Mine, Stranger, System }
 
-enum class Phase { Idle, Connecting, Waiting, Chatting }
+data class Msg(val text: String, val kind: Kind, val time: Long = System.currentTimeMillis())
+
+enum class Phase { Idle, Connecting, Waiting, Chatting, Ended }
 
 data class UiState(
     val phase: Phase = Phase.Idle,
-    val messages: List<ChatMsg> = emptyList(),
+    val messages: List<Msg> = emptyList(),
     val online: Int = 0,
-    val remoteVideo: VideoTrack? = null,
-    val localVideo: VideoTrack? = null,
-    val micOn: Boolean = true,
-    val camOn: Boolean = true,
+    val strangerTyping: Boolean = false,
     val notice: String? = null,
 )
 
-class ChatViewModel(app: Application) : AndroidViewModel(app) {
-
-    val eglBase: EglBase = EglBase.create()
+class ChatViewModel : ViewModel() {
 
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private val main = Handler(Looper.getMainLooper())
-    private val audio = app.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var signaling: Signaling? = null
-    private var rtc: RtcClient? = null
+    private var typingSent = false
 
-    /** Call after camera + mic permissions are granted and the 18+ checkbox is ticked. */
+    private val stopTyping = Runnable { setTyping(false) }
+    private val clearStrangerTyping = Runnable { _state.update { it.copy(strangerTyping = false) } }
+    private val clearNotice = Runnable { _state.update { it.copy(notice = null) } }
+
+    /** Connects to the server and starts looking for a stranger. */
     fun start() {
         stop()
-        val client = RtcClient(
-            context = getApplication(),
-            eglBase = eglBase,
-            onSignal = { data -> sendRaw(JSONObject().put("type", "signal").put("data", data)) },
-            onRemoteVideo = { track -> main.post { _state.update { it.copy(remoteVideo = track) } } },
-        )
-        client.startLocalMedia()
-        rtc = client
-
-        audio.mode = AudioManager.MODE_IN_COMMUNICATION
-        audio.isSpeakerphoneOn = true
-
-        _state.value = UiState(phase = Phase.Connecting, localVideo = client.localVideoTrack)
-
+        _state.value = UiState(phase = Phase.Connecting)
         signaling = Signaling(BuildConfig.SERVER_URL, object : Signaling.Listener {
             override fun onOpen() {
-                sendRaw(JSONObject().put("type", "join").put("age18", true))
+                signaling?.send(JSONObject().put("type", "join").put("age18", true))
             }
 
             override fun onMessage(json: JSONObject) {
@@ -80,117 +60,116 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stop(notice: String? = null) {
+        main.removeCallbacksAndMessages(null)
+        typingSent = false
         signaling?.let {
             it.send(JSONObject().put("type", "leave"))
             it.close()
         }
         signaling = null
-        rtc?.release()
-        rtc = null
-        audio.mode = AudioManager.MODE_NORMAL
-        audio.isSpeakerphoneOn = false
         _state.value = UiState(phase = Phase.Idle, notice = notice)
     }
 
-    fun setNotice(text: String?) = _state.update { it.copy(notice = text) }
-
+    /** Skip the current stranger (or find a new one after they left). */
     fun next() {
-        rtc?.endCall()
-        _state.update { it.copy(phase = Phase.Waiting, messages = emptyList(), remoteVideo = null, notice = null) }
-        sendRaw(JSONObject().put("type", "next"))
+        main.removeCallbacks(stopTyping)
+        typingSent = false
+        _state.update {
+            it.copy(phase = Phase.Waiting, messages = emptyList(), strangerTyping = false)
+        }
+        signaling?.send(JSONObject().put("type", "next"))
     }
 
     fun report() {
-        sendRaw(JSONObject().put("type", "report").put("reason", "user_report"))
+        signaling?.send(JSONObject().put("type", "report").put("reason", "user_report"))
         next()
-        _state.update { it.copy(notice = "Reported. Finding someone new…") }
+        showNotice("Thanks, we've recorded your report. Looking for someone new…")
     }
 
     fun sendChat(text: String) {
         val clean = text.trim()
         if (clean.isEmpty() || _state.value.phase != Phase.Chatting) return
-        sendRaw(JSONObject().put("type", "chat").put("text", clean))
-        _state.update { it.copy(messages = it.messages + ChatMsg(clean, true)) }
+        main.removeCallbacks(stopTyping)
+        setTyping(false)
+        signaling?.send(JSONObject().put("type", "chat").put("text", clean))
+        addMessage(Msg(clean, Kind.Mine))
     }
 
-    fun toggleMic() {
-        val on = !_state.value.micOn
-        rtc?.setMicEnabled(on)
-        _state.update { it.copy(micOn = on) }
+    /** Call whenever the text field changes so the stranger sees "typing…". */
+    fun onDraftChanged(text: String) {
+        if (_state.value.phase != Phase.Chatting) return
+        main.removeCallbacks(stopTyping)
+        if (text.isBlank()) {
+            setTyping(false)
+            return
+        }
+        setTyping(true)
+        main.postDelayed(stopTyping, 2500)
     }
 
-    fun toggleCam() {
-        val on = !_state.value.camOn
-        rtc?.setCameraEnabled(on)
-        _state.update { it.copy(camOn = on) }
+    private fun setTyping(on: Boolean) {
+        if (typingSent == on) return
+        typingSent = on
+        signaling?.send(JSONObject().put("type", "typing").put("on", on))
     }
 
-    fun flipCamera() {
-        rtc?.switchCamera()
+    private fun addMessage(msg: Msg) {
+        _state.update { it.copy(messages = (it.messages + msg).takeLast(300)) }
+    }
+
+    private fun showNotice(text: String) {
+        main.removeCallbacks(clearNotice)
+        _state.update { it.copy(notice = text) }
+        main.postDelayed(clearNotice, 3500)
     }
 
     private fun handle(m: JSONObject) {
         when (m.optString("type")) {
-            "waiting" -> {
-                rtc?.endCall()
-                _state.update { it.copy(phase = Phase.Waiting, messages = emptyList(), remoteVideo = null) }
+            "waiting" -> _state.update {
+                it.copy(phase = Phase.Waiting, messages = emptyList(), strangerTyping = false)
             }
 
-            "matched" -> {
-                _state.update { it.copy(phase = Phase.Chatting, messages = emptyList(), notice = null) }
-                rtc?.startCall(m.optBoolean("initiator"), parseIce(m.optJSONArray("iceServers")))
+            "matched" -> _state.update {
+                it.copy(
+                    phase = Phase.Chatting,
+                    strangerTyping = false,
+                    messages = listOf(Msg("You're connected to a stranger. Say hi! 👋", Kind.System)),
+                )
             }
 
-            "signal" -> m.optJSONObject("data")?.let { rtc?.handleSignal(it) }
+            "chat" -> {
+                main.removeCallbacks(clearStrangerTyping)
+                _state.update { it.copy(strangerTyping = false) }
+                addMessage(Msg(m.optString("text"), Kind.Stranger))
+            }
 
-            "chat" -> _state.update {
-                it.copy(messages = it.messages + ChatMsg(m.optString("text"), false))
+            "typing" -> {
+                main.removeCallbacks(clearStrangerTyping)
+                val on = m.optBoolean("on")
+                _state.update { it.copy(strangerTyping = on) }
+                if (on) main.postDelayed(clearStrangerTyping, 5000)
             }
 
             "partner_left" -> {
-                rtc?.endCall()
+                main.removeCallbacks(clearStrangerTyping)
                 _state.update {
                     it.copy(
-                        phase = Phase.Waiting,
-                        messages = emptyList(),
-                        remoteVideo = null,
-                        notice = "Stranger left. Finding someone new…",
+                        phase = Phase.Ended,
+                        strangerTyping = false,
+                        messages = (it.messages + Msg("The stranger left the chat.", Kind.System)).takeLast(300),
                     )
                 }
-                sendRaw(JSONObject().put("type", "next"))
             }
 
             "online" -> _state.update { it.copy(online = m.optInt("count")) }
 
-            "banned" -> stop("You have been temporarily banned after multiple reports.")
+            "banned" -> stop("You've been temporarily banned after multiple reports.")
 
-            "error" -> _state.update { it.copy(notice = m.optString("message")) }
+            "error" -> showNotice(m.optString("message"))
         }
-    }
-
-    private fun sendRaw(obj: JSONObject) {
-        signaling?.send(obj)
-    }
-
-    private fun parseIce(arr: JSONArray?): List<PeerConnection.IceServer> {
-        val out = mutableListOf<PeerConnection.IceServer>()
-        if (arr != null) {
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                val builder = PeerConnection.IceServer.builder(o.getString("urls"))
-                if (o.has("username")) builder.setUsername(o.getString("username"))
-                if (o.has("credential")) builder.setPassword(o.getString("credential"))
-                out += builder.createIceServer()
-            }
-        }
-        if (out.isEmpty()) {
-            out += PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer()
-        }
-        return out
     }
 
     override fun onCleared() {
         stop()
-        eglBase.release()
     }
 }

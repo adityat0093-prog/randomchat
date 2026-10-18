@@ -12,18 +12,6 @@ const bans = new Map();    // ip -> ban expiry (ms)
 const reports = new Map(); // ip -> [timestamps of reports against it]
 const queue = [];          // sockets waiting for a partner
 
-function iceServers() {
-  const list = [{ urls: 'stun:stun.l.google.com:19302' }];
-  if (process.env.TURN_URL) {
-    list.push({
-      urls: process.env.TURN_URL,
-      username: process.env.TURN_USER || '',
-      credential: process.env.TURN_PASS || '',
-    });
-  }
-  return list;
-}
-
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end(req.url === '/health' ? 'ok' : 'random-chat signaling server');
@@ -82,9 +70,8 @@ function tryMatch() {
     }
     a.partner = b;
     b.partner = a;
-    const servers = iceServers();
-    send(a, { type: 'matched', initiator: true, iceServers: servers });
-    send(b, { type: 'matched', initiator: false, iceServers: servers });
+    send(a, { type: 'matched' });
+    send(b, { type: 'matched' });
   }
 }
 
@@ -139,10 +126,8 @@ function handle(ws, m) {
       break;
     }
 
-    case 'signal':
-      if (ws.partner && m.data && typeof m.data === 'object') {
-        send(ws.partner, { type: 'signal', data: m.data });
-      }
+    case 'typing':
+      if (ws.partner) send(ws.partner, { type: 'typing', on: m.on === true });
       break;
 
     case 'report':
